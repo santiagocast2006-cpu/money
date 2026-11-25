@@ -1,4 +1,4 @@
-// Money app: Today, Accounts, Spending, Upcoming, Funds. Reads everything through window.Money (data.js).
+// Money app: Today, Accounts, Spending, Upcoming, Calendar, Funds. Reads everything through window.Money (data.js).
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -17,8 +17,9 @@
 
   let S = null;        // loaded data
   let me = null;       // session
-  const ui = { spendAcct: null, spendPeriod: "statement", upDays: 45, side: "personal" };
+  const ui = { spendAcct: null, spendPeriod: "statement", upDays: 45, side: "personal", calMonth: null, calDay: null, calKind: "subs" };
   try { if (localStorage.getItem("money.side") === "business") ui.side = "business"; } catch {}
+  try { if (localStorage.getItem("money.calKind") === "all") ui.calKind = "all"; } catch {}
   const onSide = (a) => a && a.scope === ui.side;
 
   // ---------- derived data ----------
@@ -303,6 +304,101 @@
     </section>`;
   }
 
+  // ---------- calendar: each bill and subscription on its day, one month at a time ----------
+  // Status per charge: paid / pending (found in the paying account), due (still ahead),
+  // not seen (date passed, nothing matching found), no data (before that account's first read).
+  const kfmt = (n) => n >= 1000 ? "$" + (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : usd0(n);
+  const perMonth = (b) => {
+    const a = Number(b.amount_max ?? b.amount ?? 0);
+    return { monthly: a, yearly: a / 12, weekly: (a * 52) / 12, interval: b.interval_days ? (a * 365) / 12 / b.interval_days : 0 }[b.cadence] || 0;
+  };
+  function calItems(first, last) {
+    const since = {};
+    for (const t of S.transactions) if (!since[t.account_id] || t.date < since[t.account_id]) since[t.account_id] = t.date;
+    const items = [];
+    for (const b of S.bills) {
+      if (ui.calKind === "subs" && b.kind !== "subscription") continue;
+      const from = acct(b.pay_from);
+      if ((from?.scope ?? b.scope) !== ui.side) continue;
+      for (const d of occurrences(b, first, last)) {
+        const paid = paidBy(b, d);
+        const read = from && since[from.id] && since[from.id] <= ymd(d);
+        const st = paid ? (paid.pending ? "pending" : "paid") : d >= today ? "due" : read ? "missed" : "unknown";
+        items.push({ date: d, bill: b, from, paid, st, amt: paid ? Number(paid.amount) : b.amount == null ? null : Number(b.amount) });
+      }
+    }
+    return items.sort((x, y) => x.date - y.date || (y.amt ?? 0) - (x.amt ?? 0));
+  }
+  function calLi(i) {
+    const b = i.bill;
+    const money = i.amt == null ? "" : usd(i.amt);
+    const pill = { paid: `<span class="pill ok">paid ${money}</span>`, pending: `<span class="pill ok">pending ${money}</span>`,
+      missed: `<span class="pill warn">not seen</span> <span class="muted">${money}</span>`, unknown: `<span class="muted">${money || "—"}</span>` }[i.st]
+      ?? (i.amt == null ? `<span class="pill warn">amount?</span>` : money);
+    const where = i.from ? (isCard(i.from) ? "on " : "from ") + acctName(i.from) : "account not set";
+    const why = i.st === "unknown" ? " · before the first sync" : i.st === "missed" ? ` · no matching charge on ${esc(i.from?.name ?? "")} within 5 days` : "";
+    return `<li><span class="what"><span>${esc(b.name)}</span><small>${day(i.date)} · ${esc(where)}${why}${b.note ? " · " + esc(b.note) : ""}</small></span><span class="amt">${pill}</span></li>`;
+  }
+  function viewCalendar() {
+    const m0 = ui.calMonth || new Date(today.getFullYear(), today.getMonth(), 1);
+    const y = m0.getFullYear(), mo = m0.getMonth();
+    const first = new Date(y, mo, 1), last = new Date(y, mo, dim(y, mo));
+    const items = calItems(first, last);
+    const byDay = new Map();
+    for (const i of items) { const k = ymd(i.date); if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(i); }
+    const sum = (l) => l.reduce((s, i) => s + (i.amt ?? 0), 0);
+    const paid = items.filter((i) => i.paid), due = items.filter((i) => i.st === "due"), missed = items.filter((i) => i.st === "missed");
+    const subsAvg = S.bills.filter((b) => b.active !== false && b.kind === "subscription" && ((acct(b.pay_from)?.scope ?? b.scope) === ui.side)).reduce((s, b) => s + perMonth(b), 0);
+    const isNow = y === today.getFullYear() && mo === today.getMonth();
+    const sel = ui.calDay && ui.calDay.slice(0, 7) === ymd(first).slice(0, 7) ? ui.calDay : null;
+    const cells = [];
+    for (let n = 0; n < first.getDay(); n++) cells.push(`<span class="cd blank" aria-hidden="true"></span>`);
+    for (let n = 1; n <= last.getDate(); n++) {
+      const d = new Date(y, mo, n), k = ymd(d), l = byDay.get(k) || [];
+      const cls = ["cd", d < today ? "past" : "", +d === +today ? "today" : ""].filter(Boolean).join(" ");
+      const label = `${day(d)}: ${l.length ? l.length + " charge" + (l.length > 1 ? "s" : "") + ", " + usd(sum(l)) : "nothing due"}`;
+      cells.push(`<button type="button" class="${cls}" data-calday="${k}" aria-pressed="${k === sel}" aria-label="${esc(label)}">
+        <span class="dn">${n}</span>
+        <span class="ev">${l.slice(0, 4).map((i) => `<span class="e ${i.st}">${esc(i.bill.name.replace(/\s*\(.*\)$/, ""))}</span>`).join("")}${l.length > 4 ? `<span class="more">+${l.length - 4}</span>` : ""}</span>
+        ${l.length ? `<span class="tot">${sum(l) > 0 ? kfmt(sum(l)) + (l.some((i) => i.amt == null) ? "+" : "") : l.some((i) => i.amt == null) ? "?" : "$0"}</span>` : ""}</button>`);
+    }
+    const shown = sel ? byDay.get(sel) || [] : items;
+    const listDays = sel ? [[sel, shown]] : [...byDay.entries()];
+    const what = ui.calKind === "subs" ? "Subscriptions" : "Bills and subscriptions";
+    return `
+    <section class="card wide" id="cal-head">
+      <div class="calnav">
+        <div class="mon">
+          <button type="button" class="iconbtn" data-cal="-1" aria-label="Previous month">‹</button>
+          <h2>${first.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</h2>
+          <button type="button" class="iconbtn" data-cal="1" aria-label="Next month">›</button>
+          ${isNow ? "" : `<button type="button" class="btn ghost small" data-cal="0">Today</button>`}
+        </div>
+        <div class="seg" role="group" aria-label="Show">
+          <button type="button" data-calkind="subs" aria-pressed="${ui.calKind === "subs"}">Subscriptions</button>
+          <button type="button" data-calkind="all" aria-pressed="${ui.calKind !== "subs"}">Everything</button>
+        </div>
+      </div>
+      <div class="grid2">
+        ${kv(what + " this month", usd(sum(items)))}
+        ${kv("Paid", usd(sum(paid)))}
+        ${kv(isNow || first > today ? "Still to come" : "Was due, not seen", isNow || first > today ? usd(sum(due)) : usd(sum(missed)))}
+        ${ui.calKind === "subs" ? kv("Subscriptions, average month", usd(subsAvg)) : ""}
+      </div>
+      <div class="calgrid" role="group" aria-label="Days">
+        ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((w) => `<span class="wd" aria-hidden="true">${w.slice(0, 1)}<span class="wd-rest">${w.slice(1)}</span></span>`).join("")}
+        ${cells.join("")}
+      </div>
+      <div class="legend" aria-hidden="true"><span><i class="due"></i>due</span><span><i class="paid"></i>paid</span><span><i class="missed"></i>not seen</span><span><i class="unknown"></i>before first sync</span></div>
+    </section>
+    <section class="card wide" id="cal-list">
+      <header><h2>${sel ? day(parse(sel)) : "All of " + first.toLocaleDateString("en-US", { month: "long" })}</h2>${sel ? `<button type="button" class="btn ghost small" data-calday="${sel}">Show the whole month</button>` : ""}</header>
+      ${listDays.length && shown.length ? listDays.map(([k, l]) => `${sel ? "" : `<div class="day">${day(parse(k))}</div>`}<ul class="list">${l.map(calLi).join("")}</ul>`).join("")
+        : `<p class="muted">${sel ? "Nothing due this day." : "Nothing due this month."}</p>`}
+      ${missed.length ? `<p class="note">"Not seen" means no charge with that name and a close amount turned up in the paying account within 5 days. It may have been charged under another name, on another card, or been cancelled.</p>` : ""}
+    </section>`;
+  }
+
   function viewFunds() {
     if (!S.funds.length) return `<section class="card wide"><h2>Funds</h2><p class="muted">No funds yet.</p></section>`;
     const mon = (d) => d.toLocaleDateString("en-US", { month: "short" });
@@ -353,7 +449,7 @@
   }
 
   // ---------- shell ----------
-  const VIEWS = { home: viewHome, cards: viewCards, spend: viewSpend, upcoming: viewUpcoming, funds: viewFunds };
+  const VIEWS = { home: viewHome, cards: viewCards, spend: viewSpend, upcoming: viewUpcoming, calendar: viewCalendar, funds: viewFunds };
   function route() {
     let tab = (location.hash || "#home").slice(1);
     if (!VIEWS[tab] || (tab === "funds" && ui.side === "business")) tab = "home";
@@ -393,6 +489,16 @@
       return;
     }
     if (t.dataset.days) { ui.upDays = Number(t.dataset.days); route(); return; }
+    if (t.dataset.cal) {
+      const n = Number(t.dataset.cal), m0 = ui.calMonth || new Date(today.getFullYear(), today.getMonth(), 1);
+      ui.calMonth = n === 0 ? null : new Date(m0.getFullYear(), m0.getMonth() + n, 1); ui.calDay = null; route(); return;
+    }
+    if (t.dataset.calday) {
+      ui.calDay = ui.calDay === t.dataset.calday ? null : t.dataset.calday; route();
+      if (ui.calDay) $("#cal-list")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return;
+    }
+    if (t.dataset.calkind) { ui.calKind = t.dataset.calkind; try { localStorage.setItem("money.calKind", ui.calKind); } catch {} route(); return; }
     if (t.dataset.pay) {
       const [fid, mid, amt, month] = t.dataset.pay.split(":");
       if (t.dataset.armed !== "1") { t.dataset.armed = "1"; t.textContent = "Paid?"; return; }
