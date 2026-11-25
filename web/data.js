@@ -36,6 +36,15 @@ window.Money = (() => {
   async function mfaVerify(factorId, code) { ok(await sb.auth.mfa.challengeAndVerify({ factorId, code })); }
 
   const rows = (p) => p.then(({ data, error }) => { if (error) throw error; return data || []; });
+  // The server returns at most 1000 rows per request, so read long tables in pages.
+  async function all(query) {
+    const out = [];
+    for (let from = 0; ; from += 1000) {
+      const page = await rows(query().range(from, from + 999));
+      out.push(...page);
+      if (page.length < 1000) return out;
+    }
+  }
 
   async function load() {
     if (!sb) {
@@ -46,12 +55,12 @@ window.Money = (() => {
     const since = new Date(Date.now() - 120 * 864e5).toISOString().slice(0, 10);
     const [accounts, transactions, bills, syncs, funds, members, entries] = await Promise.all([
       rows(sb.from("accounts").select("*")),
-      rows(sb.from("transactions").select("*").gte("date", since).order("date", { ascending: false }).limit(5000)),
+      all(() => sb.from("transactions").select("*").gte("date", since).order("date", { ascending: false }).order("id", { ascending: false })),
       rows(sb.from("bills").select("*")),
       rows(sb.from("syncs").select("*").order("at", { ascending: false }).limit(1)),
       rows(sb.from("funds").select("*")),
       rows(sb.from("fund_members").select("*")),
-      rows(sb.from("fund_entries").select("*").order("on_date", { ascending: false })),
+      all(() => sb.from("fund_entries").select("*").order("on_date", { ascending: false }).order("id", { ascending: false })),
     ]);
     return { accounts, transactions, bills, syncs, funds, members, entries };
   }

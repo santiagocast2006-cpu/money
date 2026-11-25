@@ -2,3 +2,5 @@ web/seed.local.json
 *.local.*
 .DS_Store
 data/*.local.json
+ios/Money.xcodeproj/
+ios/build/

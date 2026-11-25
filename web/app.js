@@ -219,7 +219,7 @@
       const warns = [];
       if (used != null && used >= 0.9) warns.push(`<span class="pill bad">${(used * 100).toFixed(0)}% of limit</span>`);
       if (auto && cashOf(auto) < 50) warns.push(`<span class="pill warn">AutoPay account has ${usd(cashOf(auto))}</span>`);
-      if (bal == null) warns.push(`<span class="pill plain">not read yet</span>`);
+      if (bal == null && (isCard(a) || a.available == null)) warns.push(`<span class="pill plain">not read yet</span>`);
       return `<section class="card" id="acct-${esc(a.id)}">
         <header><h3>${esc(acctName(a))}</h3><span class="muted" style="font-size:13px">${esc(a.institution)}</span></header>
         ${warns.length ? `<div class="members">${warns.join("")}</div>` : ""}
