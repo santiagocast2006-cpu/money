@@ -18,6 +18,11 @@ COLS = {
     "fund_entries": ["id", "fund_id", "member_id", "kind", "month", "amount", "on_date", "note"],
 }
 SRC = {"fund_members": "members", "fund_entries": "entries"}
+# Columns that are NOT NULL with a default: an absent value takes the default instead of null.
+DEFAULTS = {("accounts", "pending"): 0, ("accounts", "scope"): "personal", ("accounts", "sort"): 100,
+            ("transactions", "pending"): False, ("bills", "scope"): "personal", ("bills", "kind"): "subscription",
+            ("syncs", "sources"): [], ("syncs", "missing"): [], ("fund_members", "sort"): 100,
+            ("fund_entries", "kind"): "deposit", ("funds", "monthly_per_person"): 100}
 
 def lit(v):
     if v is None: return "null"
@@ -32,11 +37,9 @@ out = ["-- Starter data. Run once in the SQL editor after the owner's account ex
 for table, cols in COLS.items():
     rows = d.get(SRC.get(table, table), [])
     if not rows: continue
-    if table == "accounts":
-        sorted_ids = None
     vals = []
     for r in rows:
-        vals.append("(" + ",".join([lit(r.get(c)) for c in cols] + ["(select id from me)"]) + ")")
+        vals.append("(" + ",".join([lit(r[c] if r.get(c) is not None else DEFAULTS.get((table, c))) for c in cols] + ["(select id from me)"]) + ")")
     out.append(f"insert into public.{table} ({','.join(cols)},owner) values\n  " + ",\n  ".join(vals) + ";")
 for t in ("funds", "fund_members", "fund_entries"):
     out.append(f"select setval(pg_get_serial_sequence('public.{t}','id'), (select max(id) from public.{t}));")
