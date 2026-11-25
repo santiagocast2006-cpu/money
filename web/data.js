@@ -62,9 +62,19 @@ window.Money = (() => {
 
   // The morning sync calls this from a browser tab where the owner is signed in (with the code step).
   // payload: {accounts:[{id,...}], transactions:[{account_id,date,merchant,amount,pending,category}], sync:{sources,missing,note}}
+  // Rows in one upsert must share the same keys, or the missing ones are written as null.
+  // So: start from what is stored, lay the new fields over it, and fill any gap with the column default.
+  const DEFAULTS = { pending: 0, sort: 100, scope: "personal", active: true, kind: "subscription" };
+  function sameKeys(list) {
+    const keys = [...new Set(list.flatMap((r) => Object.keys(r)))].filter((k) => k !== "owner");
+    return list.map((r) => Object.fromEntries(keys.map((k) => [k, k in r ? r[k] : (DEFAULTS[k] ?? null)])));
+  }
+
   async function importSync(payload) {
     needServer();
-    const accts = payload.accounts || [];
+    const given = payload.accounts || [];
+    const stored = given.length ? await rows(sb.from("accounts").select("*").in("id", given.map((a) => a.id))) : [];
+    const accts = sameKeys(given.map((a) => ({ ...(stored.find((s) => s.id === a.id) || {}), ...a })));
     if (accts.length) await rows(sb.from("accounts").upsert(accts, { onConflict: "id" }).select("id"));
     const tx = payload.transactions || [];
     const synced = [...new Set(tx.map((t) => t.account_id))];
@@ -75,9 +85,17 @@ window.Money = (() => {
         onConflict: "account_id,date,merchant,amount,pending", ignoreDuplicates: true,
       }).select("id"));
     }
-    if (payload.bills) await rows(sb.from("bills").upsert(payload.bills).select("id"));
+    // Bills: rows with an id update that bill (merged over what is stored); rows without one are new.
+    const bills = payload.bills || [];
+    const old = bills.filter((b) => b.id != null);
+    if (old.length) {
+      const have = await rows(sb.from("bills").select("*").in("id", old.map((b) => b.id)));
+      await rows(sb.from("bills").upsert(sameKeys(old.map((b) => ({ ...(have.find((h) => h.id === b.id) || {}), ...b }))), { onConflict: "id" }).select("id"));
+    }
+    const fresh = bills.filter((b) => b.id == null).map(({ id, ...b }) => b);
+    if (fresh.length) await rows(sb.from("bills").insert(sameKeys(fresh)).select("id"));
     await rows(sb.from("syncs").insert(payload.sync || { sources: [], note: "manual import" }).select("id"));
-    return { accounts: accts.length, transactions: tx.length };
+    return { accounts: accts.length, transactions: tx.length, bills: bills.length };
   }
 
   return { local: !sb, session, signIn, signOut, mfaState, mfaEnroll, mfaVerify, load, addEntry, deleteEntry, importSync };
