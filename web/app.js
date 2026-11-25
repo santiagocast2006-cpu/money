@@ -419,7 +419,7 @@
 
   function showOnly(id) {
     for (const x of ["#signin", "#mfa"]) $(x).hidden = x !== id;
-    $("#main").hidden = !!id; $("#tabs").hidden = !!id;
+    for (const x of ["#main", "#tabs", "#side", "#synced"]) $(x).hidden = !!id;
   }
 
   // Second step: a 6-digit code from an authenticator app. First time, scan the QR code to set it up.
