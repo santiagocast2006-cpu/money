@@ -104,8 +104,8 @@ struct Book {
         // A card minimum can be paid any time in the cycle before it's due, and editor pay sometimes goes out
         // up to two weeks early; everything else lands within 5 days.
         let (back, ahead) = b.kind == "card_minimum" ? (25, 3) : b.kind == "payroll" ? (15, 5) : (5, 5)
-        // A date further out can't be paid yet, except editor pay that already went out early.
-        guard let pf = b.payFrom, d <= Day.add(today, b.kind == "payroll" ? back : 3) else { return nil }
+        // A date further out can't be paid yet, except editor pay or a card minimum that already went out early.
+        guard let pf = b.payFrom, d <= Day.add(today, (b.kind == "payroll" || b.kind == "card_minimum") ? back : 3) else { return nil }
         let word: String = {
             if let m = b.match, !m.isEmpty { return m.lowercased() }
             return String(b.name.split(omittingEmptySubsequences: false, whereSeparator: { $0.isWhitespace || $0 == "(" }).first ?? "").lowercased()
