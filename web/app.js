@@ -61,10 +61,12 @@
   // A bill counts as paid when its account shows a charge (posted or pending) near the due date
   // whose merchant matches (bill.match, else the bill's first word) and whose amount fits.
   function paidBy(b, d) {
-    if (!b.pay_from || d > addDays(today, 3)) return null;
+    // A card minimum can be paid any time in the cycle before it's due, and editor pay sometimes goes out
+    // up to two weeks early; everything else lands within 5 days.
+    const [back, ahead] = b.kind === "card_minimum" ? [25, 3] : b.kind === "payroll" ? [15, 5] : [5, 5];
+    // A date further out can't be paid yet, except editor pay that already went out early.
+    if (!b.pay_from || d > addDays(today, b.kind === "payroll" ? back : 3)) return null;
     const word = (b.match || b.name.split(/[\s(]/)[0]).toLowerCase();
-    // A card minimum can be paid any time in the cycle before it's due; everything else lands within 5 days.
-    const [back, ahead] = b.kind === "card_minimum" ? [25, 3] : [5, 5];
     const near = S.transactions.filter((t) => t.account_id === b.pay_from && Number(t.amount) > 0
       && (parse(String(t.date).slice(0, 10)) - d) / 864e5 >= -back && (parse(String(t.date).slice(0, 10)) - d) / 864e5 <= ahead
       && String(t.merchant).toLowerCase().includes(word));
