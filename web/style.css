@@ -142,3 +142,13 @@ td.n, th.n { text-align: right; }
 .note { font-size: 13px; color: var(--muted); margin: 0; }
 details summary { cursor: pointer; color: var(--accent); font-weight: 500; font-size: 14px; }
 @media (max-width: 420px) { .tabs { gap: 0; } .tabs a { padding: 7px 9px; } .big { font-size: 30px; } .bars .b { grid-template-columns: minmax(80px, 36%) 1fr auto; } }
+
+.qr { background: #fff; padding: 10px; border-radius: 12px; justify-self: center; }
+.fundgrid { width: auto; font-size: 13.5px; }
+.fundgrid th, .fundgrid td { padding: 4px 2px; text-align: center; border-top: 1px solid var(--line); }
+.fundgrid thead th { border-top: 0; }
+.fundgrid tbody th { text-align: left; font-weight: 500; font-size: 14px; color: var(--ink); padding-right: 6px; }
+.fundgrid th.now { color: var(--accent); }
+.fundgrid .cell { display: inline-grid; place-items: center; min-width: 40px; height: 32px; border-radius: 8px; font: 500 12.5px var(--font); border: 1px dashed var(--line); background: transparent; color: var(--muted); cursor: pointer; padding: 0 6px; }
+.fundgrid .cell.paid { border: 0; background: var(--accent-soft); color: var(--ok); font-weight: 700; cursor: default; }
+.fundgrid .cell.owed { border: 1px solid var(--warn); color: var(--warn); background: var(--warn-soft); }

@@ -91,10 +91,20 @@
     };
   }
 
+  const monthsBetween = (a, b) => (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()) + 1;
+  // Months that should be paid by the end of this month (capped at the fund's last month).
   function monthsIn(fund, asOf = today) {
     const s = parse(fund.start_month);
-    const n = (asOf.getFullYear() - s.getFullYear()) * 12 + (asOf.getMonth() - s.getMonth()) + 1;
-    return Math.max(0, n);
+    const end = fund.end_month && parse(fund.end_month) < asOf ? parse(fund.end_month) : asOf;
+    return Math.max(0, monthsBetween(s, end));
+  }
+  // Every month of the fund: start to end, or start to this month when open-ended.
+  function fundMonths(fund) {
+    const s = parse(fund.start_month);
+    const e = fund.end_month ? parse(fund.end_month) : today;
+    const out = [];
+    for (let i = 0; i < monthsBetween(s, e); i++) out.push(new Date(s.getFullYear(), s.getMonth() + i, 1));
+    return out;
   }
 
   function fundState(f) {
@@ -109,11 +119,15 @@
       const mine = deposits.filter((e) => e.member_id === m.id);
       const paid = mine.reduce((s, e) => s + Number(e.amount), 0);
       const thisMonth = mine.filter((e) => String(e.month).slice(0, 10) === key).reduce((s, e) => s + Number(e.amount), 0);
-      return { m, per: per(m), paid, thisMonth, owes: Math.max(0, per(m) * months - paid) };
+      const byMonth = new Map();
+      for (const e of mine) { const k = String(e.month ?? e.on_date).slice(0, 7); byMonth.set(k, (byMonth.get(k) || 0) + Number(e.amount)); }
+      return { m, per: per(m), paid, thisMonth, byMonth, owes: Math.max(0, per(m) * months - paid) };
     });
     const put = deposits.reduce((s, e) => s + Number(e.amount), 0);
     const expected = rows.reduce((s, r) => s + r.per * months, 0) - out;
-    return { members, rows, entries, months, key, expected, actual: put - out, out, monthlyTotal: rows.reduce((s, r) => s + r.per, 0) };
+    const all = fundMonths(f);
+    const goal = f.goal ?? (f.end_month ? rows.reduce((s, r) => s + r.per, 0) * all.length : null);
+    return { members, rows, entries, months, all, goal, key, expected, actual: put - out, out, monthlyTotal: rows.reduce((s, r) => s + r.per, 0) };
   }
 
   // ---------- views ----------
@@ -170,7 +184,7 @@
     </section>
 
     <section class="card" id="today-business">
-      <header><h2>Business</h2><span class="muted" style="font-size:13px">Eros Group</span></header>
+      <header><h2>Business</h2></header>
       <div class="row"><span>Cash</span><span class="amt">${usd(bc)}</span></div>
       <div class="row"><span>Subscriptions and bills, next 14 days</span><span class="amt">${usd(bn.high)}</span></div>
       ${status(bc, bn)}
@@ -302,42 +316,48 @@
 
   function viewFunds() {
     if (!S.funds.length) return `<section class="card wide"><h2>Funds</h2><p class="muted">No funds yet.</p></section>`;
+    const mon = (d) => d.toLocaleDateString("en-US", { month: "short" });
     return S.funds.map((f) => {
       const st = fundState(f);
       const behind = st.expected - st.actual;
-      const monthName = today.toLocaleDateString("en-US", { month: "long" });
       const started = st.months > 0;
-      const chips = st.rows.map((r) => {
-        const done = r.thisMonth >= r.per;
-        return `<span class="chip ${done ? "paid" : ""}">${esc(r.m.name)} ${done ? "✓" : usd0(r.per - r.thisMonth)}
-          ${!done && isOwner && started ? `<button data-pay="${f.id}:${r.m.id}:${r.per - r.thisMonth}" aria-label="Mark ${esc(r.m.name)} paid for ${monthName}">Mark paid</button>` : ""}</span>`;
-      }).join("");
-      const hist = st.entries.slice().sort((x, y) => (y.on_date > x.on_date ? 1 : -1)).slice(0, 40);
+      const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      const lastMonth = st.all[st.all.length - 1];
+      const over = f.end_month && parse(f.end_month) < new Date(today.getFullYear(), today.getMonth(), 1);
+      const nowKey = ymd(new Date(today.getFullYear(), today.getMonth(), 1)).slice(0, 7);
+      // Who paid which month: one row per person, one cell per month. Tap an empty cell to mark it paid.
+      const grid = `<div class="scroll"><table class="fundgrid">
+        <thead><tr><th></th>${st.all.map((d) => `<th class="${ymd(d).slice(0, 7) === nowKey ? "now" : ""}">${mon(d)}</th>`).join("")}</tr></thead>
+        <tbody>${st.rows.map((r) => `<tr><th scope="row">${esc(r.m.name)}</th>${st.all.map((d) => {
+          const k = ymd(d).slice(0, 7), got = r.byMonth.get(k) || 0, due = d <= today;
+          if (got >= r.per) return `<td><span class="cell paid" title="Paid ${usd0(got)}">✓</span></td>`;
+          return `<td><button class="cell ${due ? "owed" : ""}" data-pay="${f.id}:${r.m.id}:${r.per - got}:${ymd(d)}" aria-label="Mark ${esc(r.m.name)} paid for ${d.toLocaleDateString("en-US", { month: "long" })}">${got ? usd0(got) : due ? "owes" : "·"}</button></td>`;
+        }).join("")}</tr>`).join("")}</tbody></table></div>`;
+      const hist = st.entries.slice().sort((x, y) => (y.on_date > x.on_date ? 1 : -1)).slice(0, 60);
       const who = (id) => st.members.find((m) => m.id === id)?.name ?? "";
+      const owers = st.rows.filter((r) => r.owes > 0);
       return `<section class="card wide" id="fund-${f.id}">
-        <header><h2>${esc(f.name)}</h2><span class="muted" style="font-size:13px">${st.members.map((m) => esc(m.name)).join(", ")}</span></header>
+        <header><h2>${esc(f.name)}</h2><span class="muted" style="font-size:13px">${usd0(f.monthly_per_person)} each a month${lastMonth ? `, ${mon(parse(f.start_month))}–${mon(lastMonth)} ${lastMonth.getFullYear()}` : ""}</span></header>
         <div class="grid2">
           ${kv("Has", `<span class="mid num">${usd0(st.actual)}</span>`)}
-          ${kv(started ? `Should have by ${short(new Date(today.getFullYear(), today.getMonth() + 1, 0))}` : "Starts", started ? `<span class="mid num">${usd0(st.expected)}</span>` : short(parse(f.start_month)))}
-          ${kv("Each month", usd0(st.monthlyTotal) + ` <small class="muted">${usd0(f.monthly_per_person)} each</small>`)}
-          ${f.goal ? kv("Goal", usd0(f.goal)) : ""}
+          ${started ? kv(over ? "Should have" : `Should have by ${short(endOfMonth)}`, `<span class="mid num">${usd0(st.expected)}</span>`) : kv("Starts", short(parse(f.start_month)))}
+          ${st.goal ? kv(f.end_month ? `At the end (${mon(lastMonth)})` : "Goal", usd0(st.goal)) : ""}
         </div>
-        ${started ? (behind > 0 ? `<p class="status warn">${usd0(behind)} behind. ${st.rows.filter((r) => r.owes > 0).map((r) => `${esc(r.m.name)} owes ${usd0(r.owes)}`).join(", ")}.</p>` : `<p class="status ok">Everyone is up to date.</p>`) : `<p class="note">First deposits are due ${short(parse(f.start_month))}.</p>`}
-        ${f.goal ? `<div class="meter"><span style="width:${Math.min(100, (st.actual / f.goal) * 100).toFixed(1)}%"></span></div>` : ""}
-        <span class="label">${started ? monthName : "First month"}</span>
-        <div class="members">${chips}</div>
-        ${f.held_in ? `<p class="note">Money sits in: ${esc(f.held_in)}</p>` : isOwner ? `<p class="note">Where the money sits isn't set yet.</p>` : ""}
-        ${isOwner ? `<details><summary>Take money out</summary>
+        ${st.goal ? `<div class="meter"><span style="width:${Math.min(100, (st.actual / st.goal) * 100).toFixed(1)}%"></span></div>` : ""}
+        ${started ? (behind > 0 ? `<p class="status warn">${usd0(behind)} behind: ${owers.map((r) => `${esc(r.m.name)} ${usd0(r.owes)}`).join(", ")}.</p>` : `<p class="status ok">Everyone is up to date.</p>`) : `<p class="note">First deposits are due ${short(parse(f.start_month))}.</p>`}
+        ${grid}
+        <p class="note">Tap a month to mark it paid.${f.held_in ? ` Money sits in: ${esc(f.held_in)}.` : ""}</p>
+        <details><summary>Take money out</summary>
           <form class="row" data-withdraw="${f.id}" style="margin-top:8px;flex-wrap:wrap">
             <input id="wd-amt-${f.id}" name="amount" type="number" min="1" step="0.01" placeholder="Amount" required style="width:120px">
             <input id="wd-note-${f.id}" name="note" placeholder="What for" style="flex:1;min-width:140px">
             <button class="btn small" type="submit">Record</button>
-          </form></details>` : ""}
+          </form></details>
         <details><summary>History (${st.entries.length})</summary>
           <ul class="list" style="margin-top:6px">${hist.map((e) => `<li><span class="what"><span>${e.kind === "deposit" ? esc(who(e.member_id)) + (e.month ? " · " + parse(e.month).toLocaleDateString("en-US", { month: "short", year: "numeric" }) : "") : "Taken out" + (e.note ? ": " + esc(e.note) : "")}</span>
-            <small>${short(parse(e.on_date))}</small></span>
+            <small>${short(parse(e.on_date))}${e.kind === "deposit" && e.note ? " · " + esc(e.note) : ""}</small></span>
             <span class="row" style="gap:8px"><span class="amt ${e.kind === "deposit" ? "in" : ""}">${e.kind === "deposit" ? "+" : "−"}${usd0(e.amount)}</span>
-            ${isOwner ? `<button class="btn ghost small" data-del="${e.id}">Remove</button>` : ""}</span></li>`).join("") || `<li class="muted">Nothing yet.</li>`}</ul>
+            <button class="btn ghost small" data-del="${e.id}">Remove</button></span></li>`).join("") || `<li class="muted">Nothing yet.</li>`}</ul>
         </details>
       </section>`;
     }).join("");
@@ -368,7 +388,7 @@
 
   async function refresh() {
     S = await Money.load();
-    isOwner = Money.local || S.accounts.length > 0 || S.funds.some((f) => f.owner === me?.user?.id);
+    isOwner = true; // the app has one user: whoever signs in sees only their own rows
     header();
     route();
   }
@@ -381,9 +401,10 @@
     if (t.dataset.scope) { ui.upScope = t.dataset.scope; route(); return; }
     if (t.dataset.days) { ui.upDays = Number(t.dataset.days); route(); return; }
     if (t.dataset.pay) {
-      const [fund_id, member_id, amount] = t.dataset.pay.split(":").map(Number);
+      const [fid, mid, amt, month] = t.dataset.pay.split(":");
+      if (t.dataset.armed !== "1") { t.dataset.armed = "1"; t.textContent = "Paid?"; return; }
       t.disabled = true;
-      try { await Money.addEntry({ fund_id, member_id, kind: "deposit", month: monthKey(today), amount, on_date: ymd(today) }); await refresh(); }
+      try { await Money.addEntry({ fund_id: Number(fid), member_id: Number(mid), kind: "deposit", month, amount: Number(amt), on_date: ymd(today) }); await refresh(); }
       catch (e) { t.disabled = false; t.textContent = e.message.startsWith("This is the local") ? "Preview only" : "Didn't save"; console.error(e); }
       return;
     }
@@ -405,10 +426,39 @@
   });
   window.addEventListener("hashchange", route);
 
+  function showOnly(id) {
+    for (const x of ["#signin", "#mfa"]) $(x).hidden = x !== id;
+    $("#main").hidden = !!id; $("#tabs").hidden = !!id;
+  }
+
+  // Second step: a 6-digit code from an authenticator app. First time, scan the QR code to set it up.
+  async function codeStep(st) {
+    showOnly("#mfa");
+    let factorId = st.factorId;
+    if (st.need === "enroll") {
+      const e = await Money.mfaEnroll();
+      factorId = e.factorId;
+      $("#mfa-title").textContent = "Set up your code";
+      $("#mfa-help").textContent = "Scan this with an authenticator app (iPhone Passwords, Google Authenticator or 1Password), then type the 6-digit code it shows. You'll need a code each time you sign in.";
+      $("#mfa-qr").src = e.qr; $("#mfa-qr").hidden = false;
+      $("#mfa-secret").textContent = "Can't scan? Enter this key by hand: " + e.secret; $("#mfa-secret").hidden = false;
+    } else {
+      $("#mfa-title").textContent = "Enter your code";
+      $("#mfa-help").textContent = "Open your authenticator app and type the 6-digit code for Money.";
+    }
+    $("#mfa-code").focus();
+    $("#mfa-form").onsubmit = async (ev) => {
+      ev.preventDefault();
+      $("#mfa-err").hidden = true;
+      try { await Money.mfaVerify(factorId, $("#mfa-code").value.trim()); location.reload(); }
+      catch (e) { $("#mfa-err").textContent = "That code didn't work. Codes change every 30 seconds; try the current one."; $("#mfa-err").hidden = false; $("#mfa-code").select(); }
+    };
+  }
+
   async function start() {
     me = await Money.session();
     if (!me) {
-      $("#signin").hidden = false; $("#main").hidden = true; $("#tabs").hidden = true;
+      showOnly("#signin");
       $("#signin-form").addEventListener("submit", async (ev) => {
         ev.preventDefault();
         const fm = ev.target; $("#si-err").hidden = true;
@@ -417,7 +467,11 @@
       });
       return;
     }
-    try { await refresh(); }
+    try {
+      const st = await Money.mfaState();
+      if (st.need) { await codeStep(st); return; }
+      await refresh();
+    }
     catch (e) { $("#main").innerHTML = `<section class="card"><h2>Couldn't load</h2><p class="muted">${esc(e.message)}</p></section>`; console.error(e); }
   }
   start();

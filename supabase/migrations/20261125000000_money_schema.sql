@@ -1,8 +1,8 @@
--- Money: Santiago's finances app. Personal tables are owner-only; funds are read by their members.
--- Apply in the Supabase SQL editor of the Money project.
+-- Money: one person's finances. Every row belongs to its owner, and every read or write
+-- also needs a two-step (authenticator app) session. Apply in the Supabase SQL editor.
 
 create table if not exists public.accounts (
-  id               text primary key,                 -- e.g. 'vx-3195', 'chase-8677'
+  id               text primary key,                 -- e.g. 'card-1234'
   owner            uuid not null default auth.uid() references auth.users(id) on delete cascade,
   institution      text not null,
   name             text not null,
@@ -17,8 +17,8 @@ create table if not exists public.accounts (
   statement_date   date,
   close_day        int check (close_day between 1 and 31),
   due_day          int check (due_day between 1 and 31),
-  autopay          text,                             -- e.g. 'minimum from Capital One ..4715'
-  rewards          text,                             -- e.g. '118,433 miles'
+  autopay          text,
+  rewards          text,
   as_of            timestamptz,
   note             text,
   sort             int not null default 100
@@ -33,7 +33,7 @@ create table if not exists public.transactions (
   category    text,
   amount      numeric not null,                      -- positive = money out, negative = payment/refund in
   pending     boolean not null default false,
-  source      text,                                  -- 'capitalone', 'chase', 'plaid'
+  source      text,
   seen_at     timestamptz not null default now(),
   unique (account_id, date, merchant, amount, pending)
 );
@@ -44,7 +44,7 @@ create table if not exists public.bills (
   owner         uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name          text not null,
   amount        numeric,                             -- null = unknown (e.g. a card minimum not read yet)
-  amount_max    numeric,                             -- for a range like AT&T ~$314-401
+  amount_max    numeric,                             -- for a range
   cadence       text not null check (cadence in ('monthly','yearly','weekly','interval','once')),
   day           int,                                 -- monthly/yearly: day of month
   month         int,                                 -- yearly: month 1-12
@@ -65,17 +65,18 @@ create table if not exists public.syncs (
   owner     uuid not null default auth.uid() references auth.users(id) on delete cascade,
   at        timestamptz not null default now(),
   sources   text[] not null default '{}',
-  missing   text[] not null default '{}',            -- e.g. '{discover,robinhood}' when not signed in
+  missing   text[] not null default '{}',            -- banks not read (not signed in)
   note      text
 );
 
--- Funds (Marriage Fund, Emergency Fund): everyone puts in a set amount each month.
+-- Group savings funds: each member puts in a set amount every month, start_month to end_month.
 create table if not exists public.funds (
   id                  bigserial primary key,
   owner               uuid not null default auth.uid() references auth.users(id) on delete cascade,
   name                text not null,
   monthly_per_person  numeric not null default 100,
   start_month         date not null,                 -- first day of the first month
+  end_month           date,                          -- first day of the last month (null = open-ended)
   goal                numeric,
   held_in             text,                          -- where the money sits, in words
   note                text
@@ -83,9 +84,9 @@ create table if not exists public.funds (
 
 create table if not exists public.fund_members (
   id       bigserial primary key,
+  owner    uuid not null default auth.uid() references auth.users(id) on delete cascade,
   fund_id  bigint not null references public.funds(id) on delete cascade,
   name     text not null,
-  email    text,                                     -- lets that person sign in and see this fund
   monthly  numeric,                                  -- overrides the fund's amount for this person
   sort     int not null default 100,
   unique (fund_id, name)
@@ -93,56 +94,30 @@ create table if not exists public.fund_members (
 
 create table if not exists public.fund_entries (
   id          bigserial primary key,
+  owner       uuid not null default auth.uid() references auth.users(id) on delete cascade,
   fund_id     bigint not null references public.funds(id) on delete cascade,
   member_id   bigint references public.fund_members(id) on delete set null,
   kind        text not null default 'deposit' check (kind in ('deposit','withdrawal')),
   month       date,                                  -- which month a deposit counts for
   amount      numeric not null check (amount > 0),
   on_date     date not null default current_date,
-  note        text,
-  recorded_by uuid default auth.uid()
+  note        text
 );
 
--- Row-level security
-alter table public.accounts     enable row level security;
-alter table public.transactions enable row level security;
-alter table public.bills        enable row level security;
-alter table public.syncs        enable row level security;
-alter table public.funds        enable row level security;
-alter table public.fund_members enable row level security;
-alter table public.fund_entries enable row level security;
+-- Lock-down: signed out, nothing is reachable; signed in, you see only your own rows,
+-- and only after the authenticator-app step (aal2).
+revoke all on all tables    in schema public from anon;
+revoke all on all sequences in schema public from anon;
 
-create policy own_accounts     on public.accounts     for all using (owner = auth.uid()) with check (owner = auth.uid());
-create policy own_transactions on public.transactions for all using (owner = auth.uid()) with check (owner = auth.uid());
-create policy own_bills        on public.bills        for all using (owner = auth.uid()) with check (owner = auth.uid());
-create policy own_syncs        on public.syncs        for all using (owner = auth.uid()) with check (owner = auth.uid());
-
--- A fund is visible to its owner and to any member whose email matches the signed-in user.
-create or replace function public.is_fund_member(f bigint) returns boolean
-language sql stable security definer set search_path = public as $$
-  select exists (
-    select 1 from public.fund_members m
-    where m.fund_id = f and lower(m.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
-  ) or exists (select 1 from public.funds x where x.id = f and x.owner = auth.uid());
-$$;
-revoke all on function public.is_fund_member(bigint) from public;
-grant execute on function public.is_fund_member(bigint) to authenticated;
-
-create policy read_funds   on public.funds        for select using (public.is_fund_member(id));
-create policy write_funds  on public.funds        for all    using (owner = auth.uid()) with check (owner = auth.uid());
-create policy read_members on public.fund_members for select using (public.is_fund_member(fund_id));
-create policy write_members on public.fund_members for all
-  using (exists (select 1 from public.funds x where x.id = fund_id and x.owner = auth.uid()))
-  with check (exists (select 1 from public.funds x where x.id = fund_id and x.owner = auth.uid()));
-create policy read_entries on public.fund_entries for select using (public.is_fund_member(fund_id));
-create policy write_entries on public.fund_entries for all
-  using (exists (select 1 from public.funds x where x.id = fund_id and x.owner = auth.uid()))
-  with check (exists (select 1 from public.funds x where x.id = fund_id and x.owner = auth.uid()));
--- A member may record their own deposit (it shows as theirs; the owner can still fix or delete it).
-create policy member_deposit on public.fund_entries for insert with check (
-  kind = 'deposit' and exists (
-    select 1 from public.fund_members m
-    where m.id = member_id and m.fund_id = fund_entries.fund_id
-      and lower(m.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
-  )
-);
+do $$
+declare t text;
+begin
+  foreach t in array array['accounts','transactions','bills','syncs','funds','fund_members','fund_entries'] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('alter table public.%I force row level security', t);
+    execute format('drop policy if exists own_%s on public.%I', t, t);
+    execute format('create policy own_%s on public.%I for all to authenticated using (owner = auth.uid()) with check (owner = auth.uid())', t, t);
+    execute format('drop policy if exists mfa_%s on public.%I', t, t);
+    execute format($p$create policy mfa_%s on public.%I as restrictive for all to authenticated using ((auth.jwt() ->> 'aal') = 'aal2') with check ((auth.jwt() ->> 'aal') = 'aal2')$p$, t, t);
+  end loop;
+end $$;

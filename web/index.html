@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#0f1a17">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Money">
@@ -43,10 +46,24 @@
   </form>
 </section>
 
+<section id="mfa" class="signin" hidden>
+  <form id="mfa-form" class="card narrow">
+    <h2 id="mfa-title">Enter your code</h2>
+    <p class="muted" id="mfa-help"></p>
+    <img id="mfa-qr" class="qr" alt="QR code to add Money to your authenticator app" width="200" height="200" hidden>
+    <p class="note" id="mfa-secret" hidden></p>
+    <label for="mfa-code">6-digit code</label>
+    <input id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+    <button class="btn" type="submit">Continue</button>
+    <p class="err" id="mfa-err" hidden></p>
+    <p class="note"><a href="#" id="signout">Sign out</a></p>
+  </form>
+</section>
+
 <footer class="foot" id="foot"></footer>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
-<script src="config.js" onerror="void 0"></script>
+<script src="vendor/supabase-2.117.3.js"></script>
+<script src="config.js"></script>
 <script src="data.js"></script>
 <script src="app.js"></script>
 </body>
