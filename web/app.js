@@ -63,12 +63,19 @@
   function paidBy(b, d) {
     if (!b.pay_from || d > addDays(today, 3)) return null;
     const word = (b.match || b.name.split(/[\s(]/)[0]).toLowerCase();
-    const lo = b.amount != null ? Number(b.amount) * 0.8 : 0;
-    const hi = b.amount != null ? Number(b.amount_max ?? b.amount) * 1.2 : Infinity;
-    return S.transactions.find((t) => t.account_id === b.pay_from && Number(t.amount) > 0
-      && Number(t.amount) >= lo && Number(t.amount) <= hi
+    const near = S.transactions.filter((t) => t.account_id === b.pay_from && Number(t.amount) > 0
       && Math.abs(parse(String(t.date).slice(0, 10)) - d) <= 5 * 864e5
-      && String(t.merchant).toLowerCase().includes(word)) || null;
+      && String(t.merchant).toLowerCase().includes(word));
+    if (!near.length) return null;
+    const lo = b.amount != null ? Number(b.amount) * 0.8 : 0;
+    // A card minimum is met by any payment at least that size.
+    const hi = b.kind === "card_minimum" || b.amount == null ? Infinity : Number(b.amount_max ?? b.amount) * 1.2;
+    const one = near.find((t) => Number(t.amount) >= lo && Number(t.amount) <= hi);
+    if (one) return one;
+    // Some arrive split (editor pay in several sends, a plan billed in two parts): add them up.
+    const total = near.reduce((s, t) => s + Number(t.amount), 0);
+    if (near.length > 1 && total >= lo && total <= hi) return { ...near[0], amount: total, pending: near.some((t) => t.pending), parts: near.length };
+    return null;
   }
 
   function upcoming(days, scope = "all") {
@@ -336,7 +343,8 @@
       missed: `<span class="pill warn">not seen</span> <span class="muted">${money}</span>`, unknown: `<span class="muted">${money || "—"}</span>` }[i.st]
       ?? (i.amt == null ? `<span class="pill warn">amount?</span>` : money);
     const where = i.from ? (isCard(i.from) ? "on " : "from ") + acctName(i.from) : "account not set";
-    const why = i.st === "unknown" ? " · before the first sync" : i.st === "missed" ? ` · no matching charge on ${esc(i.from?.name ?? "")} within 5 days` : "";
+    const why = i.st === "unknown" ? " · before the first sync" : i.st === "missed" ? ` · no matching charge on ${esc(i.from?.name ?? "")} within 5 days`
+      : i.paid?.parts ? ` · in ${i.paid.parts} payments` : "";
     return `<li><span class="what"><span>${esc(b.name)}</span><small>${day(i.date)} · ${esc(where)}${why}${b.note ? " · " + esc(b.note) : ""}</small></span><span class="amt">${pill}</span></li>`;
   }
   function viewCalendar() {
