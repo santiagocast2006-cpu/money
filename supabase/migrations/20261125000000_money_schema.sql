@@ -108,6 +108,8 @@ create table if not exists public.fund_entries (
 -- and only after the authenticator-app step (aal2).
 revoke all on all tables    in schema public from anon;
 revoke all on all sequences in schema public from anon;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant usage, select on all sequences in schema public to authenticated;
 
 do $$
 declare t text;

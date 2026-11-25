@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://qdfrlegiwsjlixmtqhyr.supabase.co wss://qdfrlegiwsjlixmtqhyr.supabase.co; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#0f1a17">
@@ -18,8 +18,12 @@
 <header class="top">
   <div class="top-in">
     <h1 class="brand">Money</h1>
-    <p class="synced" id="synced"></p>
+    <div class="seg side" id="side" role="group" aria-label="Which side">
+      <button type="button" data-side="personal" aria-pressed="true">Personal</button>
+      <button type="button" data-side="business" aria-pressed="false">Business</button>
+    </div>
   </div>
+  <p class="synced" id="synced"></p>
   <nav class="tabs" id="tabs" aria-label="Sections">
     <a href="#home" data-tab="home">Today</a>
     <a href="#cards" data-tab="cards">Accounts</a>

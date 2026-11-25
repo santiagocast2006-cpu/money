@@ -17,8 +17,9 @@
 
   let S = null;        // loaded data
   let me = null;       // session
-  let isOwner = false;
-  const ui = { spendAcct: null, spendPeriod: "statement", upScope: "all", upDays: 45 };
+  const ui = { spendAcct: null, spendPeriod: "statement", upDays: 45, side: "personal" };
+  try { if (localStorage.getItem("money.side") === "business") ui.side = "business"; } catch {}
+  const onSide = (a) => a && a.scope === ui.side;
 
   // ---------- derived data ----------
   const acct = (id) => S.accounts.find((a) => a.id === id);
@@ -73,7 +74,8 @@
     const to = addDays(today, days);
     const items = [];
     for (const b of S.bills) {
-      if (scope !== "all" && b.scope !== scope) continue;
+      const side = acct(b.pay_from)?.scope ?? b.scope; // the paying account decides the side
+      if (scope !== "all" && side !== scope) continue;
       for (const d of occurrences(b, today, to)) items.push({ date: d, bill: b, from: acct(b.pay_from), paid: paidBy(b, d) });
     }
     return items.sort((x, y) => x.date - y.date || (y.bill.amount ?? 0) - (x.bill.amount ?? 0));
@@ -132,41 +134,37 @@
 
   // ---------- views ----------
   function viewHome() {
-    const personalCash = S.accounts.filter((a) => isCash(a) && a.scope === "personal");
-    const bizCash = S.accounts.filter((a) => isCash(a) && a.scope === "business");
-    const pc = personalCash.reduce((s, a) => s + cashOf(a), 0);
-    const bc = bizCash.reduce((s, a) => s + cashOf(a), 0);
-    const pn = cashNeed(14, "personal");
-    const bn = cashNeed(14, "business");
-    const cards = S.accounts.filter(isCard);
+    const side = ui.side, biz = side === "business";
+    const cash = S.accounts.filter((a) => isCash(a) && onSide(a));
+    const total = cash.reduce((s, a) => s + cashOf(a), 0);
+    const need = cashNeed(14, side);
+    const cards = S.accounts.filter((a) => isCard(a) && onSide(a));
     const owed = cards.reduce((s, a) => s + Number(a.balance ?? 0) + Number(a.pending ?? 0), 0);
     const limited = cards.filter((a) => a.credit_limit && a.balance != null);
     const limit = limited.reduce((s, a) => s + Number(a.credit_limit), 0);
     const usedOnLimited = limited.reduce((s, a) => s + Number(a.balance) + Number(a.pending ?? 0), 0);
     const known = cards.filter((a) => a.balance != null);
-    const status = (cash, need) => {
-      const gap = cash - need.high;
-      const unk = need.unknown.length ? ` plus ${need.unknown.length} amount${need.unknown.length > 1 ? "s" : ""} not read yet` : "";
-      if (gap < 0) return `<p class="status bad">Short by <span class="num">${usd(-gap)}</span> for the next 14 days${unk}.</p>`;
-      if (need.unknown.length) return `<p class="status warn">Covered for now, with <span class="num">${usd(gap)}</span> left${unk}.</p>`;
-      return `<p class="status ok">Covered, with <span class="num">${usd(gap)}</span> left after the next 14 days.</p>`;
-    };
-    const next = upcoming(10).slice(0, 8);
-    const fundsHtml = S.funds.map((f) => {
+    const gap = total - need.high;
+    const unk = need.unknown.length ? ` plus ${need.unknown.length} amount${need.unknown.length > 1 ? "s" : ""} not read yet` : "";
+    const status = gap < 0 ? `<p class="status bad">Short by <span class="num">${usd(-gap)}</span> for the next 14 days${unk}.</p>`
+      : need.unknown.length ? `<p class="status warn">Covered for now, with <span class="num">${usd(gap)}</span> left${unk}.</p>`
+      : `<p class="status ok">Covered, with <span class="num">${usd(gap)}</span> left after the next 14 days.</p>`;
+    const next = upcoming(10, side).slice(0, 8);
+    const fundsHtml = biz ? "" : S.funds.map((f) => {
       const st = fundState(f);
       const behind = st.expected - st.actual;
       return `<li><span class="what"><b>${esc(f.name)}</b><small>${st.members.length} people · ${usd0(st.monthlyTotal)} a month</small></span>
         <span class="stack" style="text-align:right"><span class="amt">${usd0(st.actual)}</span>
-        <small class="${behind > 0 ? "muted" : "muted"}">${behind > 0 ? usd0(behind) + " behind" : st.months ? "on track" : "starts " + short(parse(f.start_month))}</small></span></li>`;
+        <small class="muted">${behind > 0 ? usd0(behind) + " behind" : st.months ? "on track" : "starts " + short(parse(f.start_month))}</small></span></li>`;
     }).join("");
 
     return `
     <section class="card wide" id="today-cash">
-      <header><span class="label">Personal cash</span><span class="muted" style="font-size:13px">${personalCash.length} accounts</span></header>
-      <div class="big num">${usd(pc)}</div>
-      <div class="row"><span>Due from it in the next 14 days</span><span class="amt">${pn.low === pn.high ? usd(pn.low) : usd(pn.low) + "–" + usd(pn.high).slice(1)}</span></div>
-      ${status(pc, pn)}
-      ${pn.unknown.length ? `<p class="note">Not read yet: ${pn.unknown.map((i) => esc(i.bill.name) + " (" + short(i.date) + ")").join(", ")}.</p>` : ""}
+      <header><span class="label">${biz ? "Business" : "Personal"} cash</span><span class="muted" style="font-size:13px">${cash.length} account${cash.length === 1 ? "" : "s"}</span></header>
+      <div class="big num">${usd(total)}</div>
+      <div class="row"><span>Due from it in the next 14 days</span><span class="amt">${need.low === need.high ? usd(need.low) : usd(need.low) + "–" + usd(need.high).slice(1)}</span></div>
+      ${status}
+      ${need.unknown.length ? `<p class="note">Not read yet: ${need.unknown.map((i) => esc(i.bill.name) + " (" + short(i.date) + ")").join(", ")}.</p>` : ""}
     </section>
 
     <section class="card" id="today-next">
@@ -176,24 +174,17 @@
 
     <section class="card" id="today-cards">
       <header><h2>Cards</h2><a href="#cards" style="font-size:14px">Details</a></header>
-      <div class="row"><span>Owed on ${known.length} of ${cards.length} cards</span><span class="mid num">${usd0(owed)}</span></div>
+      ${cards.length ? `<div class="row"><span>Owed on ${known.length} of ${cards.length} card${cards.length === 1 ? "" : "s"}</span><span class="mid num">${usd0(owed)}</span></div>
       ${limit ? `<div class="meter ${usedOnLimited / limit > 0.9 ? "hot" : usedOnLimited / limit > 0.5 ? "mid" : ""}"><span style="width:${Math.min(100, (usedOnLimited / limit) * 100).toFixed(1)}%"></span></div>
       <small class="muted">${((usedOnLimited / limit) * 100).toFixed(0)}% used on the ${limited.length} card${limited.length > 1 ? "s" : ""} with a known limit (${usd0(limit)})</small>` : ""}
       <ul class="list">${cards.map((a) => `<li><span class="what"><span>${esc(acctName(a))}</span><small>${a.due_day ? "due the " + ord(a.due_day) : ""}${a.autopay ? " · " + esc(a.autopay) : ""}</small></span>
-        <span class="amt">${a.balance == null ? `<span class="pill plain">not read</span>` : usd(Number(a.balance) + Number(a.pending ?? 0))}</span></li>`).join("")}</ul>
+        <span class="amt">${a.balance == null ? `<span class="pill plain">not read</span>` : usd(Number(a.balance) + Number(a.pending ?? 0))}</span></li>`).join("")}</ul>` : `<p class="muted">No cards on this side.</p>`}
     </section>
-
-    <section class="card" id="today-business">
-      <header><h2>Business</h2></header>
-      <div class="row"><span>Cash</span><span class="amt">${usd(bc)}</span></div>
-      <div class="row"><span>Subscriptions and bills, next 14 days</span><span class="amt">${usd(bn.high)}</span></div>
-      ${status(bc, bn)}
-    </section>
-
+    ${biz ? "" : `
     <section class="card" id="today-funds">
       <header><h2>Funds</h2><a href="#funds" style="font-size:14px">Open</a></header>
       <ul class="list">${fundsHtml || `<li class="muted">No funds yet.</li>`}</ul>
-    </section>`;
+    </section>`}`;
   }
 
   function itemLi(i) {
@@ -207,9 +198,8 @@
 
   function viewCards() {
     const groups = [
-      ["Cards", S.accounts.filter(isCard)],
-      ["Personal cash", S.accounts.filter((a) => isCash(a) && a.scope === "personal")],
-      ["Business cash", S.accounts.filter((a) => isCash(a) && a.scope === "business")],
+      ["Cards", S.accounts.filter((a) => isCard(a) && onSide(a))],
+      ["Cash", S.accounts.filter((a) => isCash(a) && onSide(a))],
     ];
     const card = (a) => {
       const bal = a.balance == null ? null : Number(a.balance);
@@ -244,8 +234,8 @@
   const kv = (k, v) => `<div class="kv"><small class="muted">${k}</small><b>${v}</b></div>`;
 
   function viewSpend() {
-    const withTx = S.accounts.filter((a) => S.transactions.some((t) => t.account_id === a.id));
-    if (!withTx.length) return `<section class="card wide"><h2>Spending</h2><p class="muted">No transactions yet. They arrive with the morning sync.</p></section>`;
+    const withTx = S.accounts.filter((a) => onSide(a) && S.transactions.some((t) => t.account_id === a.id));
+    if (!withTx.length) return `<section class="card wide"><h2>Spending</h2><p class="muted">No ${ui.side} transactions yet. They arrive with the morning sync.</p></section>`;
     if (!ui.spendAcct || !withTx.some((a) => a.id === ui.spendAcct)) ui.spendAcct = (withTx.find(isCard) || withTx[0]).id;
     const a = acct(ui.spendAcct);
     let from, label;
@@ -287,7 +277,7 @@
   }
 
   function viewUpcoming() {
-    const items = upcoming(ui.upDays, ui.upScope);
+    const items = upcoming(ui.upDays, ui.side);
     const byDay = new Map();
     for (const i of items) { const k = ymd(i.date); if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(i); }
     const fromCash = items.filter((i) => !isCard(i.from) && !i.paid);
@@ -296,9 +286,6 @@
     return `
     <section class="card wide" id="up-head">
       <div class="row" style="flex-wrap:wrap">
-        <div class="seg" role="group" aria-label="Whose">
-          ${["all", "personal", "business"].map((s) => `<button data-scope="${s}" aria-pressed="${ui.upScope === s}">${s[0].toUpperCase() + s.slice(1)}</button>`).join("")}
-        </div>
         <div class="seg" role="group" aria-label="How far">
           ${[14, 45, 90].map((n) => `<button data-days="${n}" aria-pressed="${ui.upDays === n}">${n} days</button>`).join("")}
         </div>
@@ -367,10 +354,10 @@
   const VIEWS = { home: viewHome, cards: viewCards, spend: viewSpend, upcoming: viewUpcoming, funds: viewFunds };
   function route() {
     let tab = (location.hash || "#home").slice(1);
-    if (!isOwner) tab = "funds";
-    if (!VIEWS[tab]) tab = "home";
+    if (!VIEWS[tab] || (tab === "funds" && ui.side === "business")) tab = "home";
+    document.querySelectorAll("#side button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.side === ui.side)));
     document.querySelectorAll("#tabs a").forEach((a) => {
-      a.hidden = !isOwner && a.dataset.tab !== "funds";
+      a.hidden = a.dataset.tab === "funds" && ui.side === "business";
       if (a.dataset.tab === tab) { a.setAttribute("aria-current", "page"); a.scrollIntoView({ block: "nearest", inline: "nearest" }); } else a.removeAttribute("aria-current");
     });
     const main = $("#main");
@@ -388,7 +375,6 @@
 
   async function refresh() {
     S = await Money.load();
-    isOwner = true; // the app has one user: whoever signs in sees only their own rows
     header();
     route();
   }
@@ -398,7 +384,12 @@
     if (!t) return;
     if (t.id === "signout") { ev.preventDefault(); await Money.signOut(); location.reload(); return; }
     if (t.dataset.period) { ui.spendPeriod = t.dataset.period; route(); return; }
-    if (t.dataset.scope) { ui.upScope = t.dataset.scope; route(); return; }
+    if (t.dataset.side) {
+      ui.side = t.dataset.side; ui.spendAcct = null;
+      try { localStorage.setItem("money.side", ui.side); } catch {}
+      if (ui.side === "business" && location.hash === "#funds") location.hash = "#home"; else route();
+      return;
+    }
     if (t.dataset.days) { ui.upDays = Number(t.dataset.days); route(); return; }
     if (t.dataset.pay) {
       const [fid, mid, amt, month] = t.dataset.pay.split(":");
