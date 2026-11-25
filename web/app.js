@@ -243,8 +243,10 @@
     else if (ui.spendPeriod === "30") { from = addDays(today, -29); label = "in the last 30 days"; }
     else { from = new Date(today.getFullYear(), today.getMonth(), 1); label = "this month"; }
     const tx = S.transactions.filter((t) => t.account_id === a.id && parse(t.date) >= from).sort((x, y) => (y.date > x.date ? 1 : -1));
-    const out = tx.filter((t) => Number(t.amount) > 0);
-    const inn = tx.filter((t) => Number(t.amount) < 0);
+    // Moving money between your own accounts, or paying a card from checking, isn't spending.
+    const counts = (t) => !["Own transfer", "Card payment"].includes(t.category);
+    const out = tx.filter((t) => Number(t.amount) > 0 && counts(t));
+    const inn = tx.filter((t) => Number(t.amount) < 0 && counts(t));
     const spent = out.reduce((s, t) => s + Number(t.amount), 0);
     const paid = -inn.reduce((s, t) => s + Number(t.amount), 0);
     const pend = out.filter((t) => t.pending).reduce((s, t) => s + Number(t.amount), 0);
