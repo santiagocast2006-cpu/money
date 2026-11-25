@@ -63,8 +63,10 @@
   function paidBy(b, d) {
     if (!b.pay_from || d > addDays(today, 3)) return null;
     const word = (b.match || b.name.split(/[\s(]/)[0]).toLowerCase();
+    // A card minimum can be paid any time in the cycle before it's due; everything else lands within 5 days.
+    const [back, ahead] = b.kind === "card_minimum" ? [25, 3] : [5, 5];
     const near = S.transactions.filter((t) => t.account_id === b.pay_from && Number(t.amount) > 0
-      && Math.abs(parse(String(t.date).slice(0, 10)) - d) <= 5 * 864e5
+      && (parse(String(t.date).slice(0, 10)) - d) / 864e5 >= -back && (parse(String(t.date).slice(0, 10)) - d) / 864e5 <= ahead
       && String(t.merchant).toLowerCase().includes(word));
     if (!near.length) return null;
     const lo = b.amount != null ? Number(b.amount) * 0.8 : 0;
