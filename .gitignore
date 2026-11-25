@@ -1,0 +1,5 @@
+web/seed.local.json
+web/config.js
+*.local.*
+.DS_Store
+data/*.local.json

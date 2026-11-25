@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1a17">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Money">
+<title>Money</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <h1 class="brand">Money</h1>
+    <p class="synced" id="synced"></p>
+  </div>
+  <nav class="tabs" id="tabs" aria-label="Sections">
+    <a href="#home" data-tab="home">Today</a>
+    <a href="#cards" data-tab="cards">Accounts</a>
+    <a href="#spend" data-tab="spend">Spending</a>
+    <a href="#upcoming" data-tab="upcoming">Upcoming</a>
+    <a href="#funds" data-tab="funds">Funds</a>
+  </nav>
+</header>
+
+<main id="main" class="main">
+  <p class="muted pad">Loading…</p>
+</main>
+
+<section id="signin" class="signin" hidden>
+  <form id="signin-form" class="card narrow">
+    <h2>Sign in</h2>
+    <p class="muted">Use the email your invite went to.</p>
+    <label for="si-email">Email</label>
+    <input id="si-email" name="email" type="email" autocomplete="username" required>
+    <label for="si-pass">Password</label>
+    <input id="si-pass" name="password" type="password" autocomplete="current-password" required>
+    <button class="btn" type="submit">Sign in</button>
+    <p class="err" id="si-err" hidden></p>
+  </form>
+</section>
+
+<footer class="foot" id="foot"></footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+<script src="config.js" onerror="void 0"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

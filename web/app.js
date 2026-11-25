@@ -1,0 +1,424 @@
+// Money app: Today, Accounts, Spending, Upcoming, Funds. Reads everything through window.Money (data.js).
+(() => {
+  const $ = (s, el = document) => el.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const usd = (n, cents = true) => n == null || isNaN(n) ? "—" :
+    (n < 0 ? "−" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: cents ? 2 : 0, maximumFractionDigits: cents ? 2 : 0 });
+  const usd0 = (n) => usd(n, false);
+  const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const parse = (s) => { const [y, m, d] = String(s).slice(0, 10).split("-").map(Number); return new Date(y, m - 1, d); };
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const dim = (y, m) => new Date(y, m + 1, 0).getDate();
+  const day = (d) => d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  const short = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const today = (() => { const t = new Date(); return new Date(t.getFullYear(), t.getMonth(), t.getDate()); })();
+  const monthKey = (d) => ymd(new Date(d.getFullYear(), d.getMonth(), 1));
+  const ord = (n) => n + (["th", "st", "nd", "rd"][((n % 100) - 20) % 10] || ["th", "st", "nd", "rd"][n % 100] || "th");
+
+  let S = null;        // loaded data
+  let me = null;       // session
+  let isOwner = false;
+  const ui = { spendAcct: null, spendPeriod: "statement", upScope: "all", upDays: 45 };
+
+  // ---------- derived data ----------
+  const acct = (id) => S.accounts.find((a) => a.id === id);
+  const isCash = (a) => a && (a.kind === "checking" || a.kind === "savings");
+  const isCard = (a) => a && a.kind === "credit";
+  const acctName = (a) => a ? `${a.name}${a.mask ? " ··" + a.mask : ""}` : "Not set";
+  const cashOf = (a) => Number(a.available ?? a.balance ?? 0);
+
+  function occurrences(b, from, to) {
+    const out = [];
+    if (b.active === false) return out;
+    if (b.cadence === "monthly" && b.day) {
+      for (let y = from.getFullYear(), m = from.getMonth(); new Date(y, m, 1) <= to; m++) {
+        if (m > 11) { m = 0; y++; }
+        const d = new Date(y, m, Math.min(b.day, dim(y, m)));
+        if (d >= from && d <= to) out.push(d);
+      }
+    } else if (b.cadence === "yearly" && b.month && b.day) {
+      for (let y = from.getFullYear(); y <= to.getFullYear(); y++) {
+        const d = new Date(y, b.month - 1, Math.min(b.day, dim(y, b.month - 1)));
+        if (d >= from && d <= to) out.push(d);
+      }
+    } else if (b.cadence === "weekly" && b.weekday != null) {
+      let d = new Date(from);
+      while (d.getDay() !== b.weekday) d = addDays(d, 1);
+      for (; d <= to; d = addDays(d, 7)) out.push(new Date(d));
+    } else if (b.cadence === "interval" && b.interval_days && b.start_date) {
+      let d = parse(b.start_date);
+      if (d < from) d = addDays(d, Math.ceil((from - d) / 864e5 / b.interval_days) * b.interval_days);
+      for (; d <= to; d = addDays(d, b.interval_days)) out.push(new Date(d));
+    } else if (b.cadence === "once" && b.start_date) {
+      const d = parse(b.start_date);
+      if (d >= from && d <= to) out.push(d);
+    }
+    return out;
+  }
+
+  // A bill counts as paid when its account shows a charge (posted or pending) near the due date
+  // whose merchant matches (bill.match, else the bill's first word) and whose amount fits.
+  function paidBy(b, d) {
+    if (!b.pay_from || d > addDays(today, 3)) return null;
+    const word = (b.match || b.name.split(/[\s(]/)[0]).toLowerCase();
+    const lo = b.amount != null ? Number(b.amount) * 0.8 : 0;
+    const hi = b.amount != null ? Number(b.amount_max ?? b.amount) * 1.2 : Infinity;
+    return S.transactions.find((t) => t.account_id === b.pay_from && Number(t.amount) > 0
+      && Number(t.amount) >= lo && Number(t.amount) <= hi
+      && Math.abs(parse(String(t.date).slice(0, 10)) - d) <= 5 * 864e5
+      && String(t.merchant).toLowerCase().includes(word)) || null;
+  }
+
+  function upcoming(days, scope = "all") {
+    const to = addDays(today, days);
+    const items = [];
+    for (const b of S.bills) {
+      if (scope !== "all" && b.scope !== scope) continue;
+      for (const d of occurrences(b, today, to)) items.push({ date: d, bill: b, from: acct(b.pay_from), paid: paidBy(b, d) });
+    }
+    return items.sort((x, y) => x.date - y.date || (y.bill.amount ?? 0) - (x.bill.amount ?? 0));
+  }
+
+  // What has to come out of checking/savings (a bill charged to a card adds to the card instead).
+  function cashNeed(days, scope) {
+    const items = upcoming(days, scope).filter((i) => !isCard(i.from) && !i.paid);
+    const known = items.filter((i) => i.bill.amount != null);
+    return {
+      items,
+      low: known.reduce((s, i) => s + Number(i.bill.amount), 0),
+      high: known.reduce((s, i) => s + Number(i.bill.amount_max ?? i.bill.amount), 0),
+      unknown: items.filter((i) => i.bill.amount == null),
+    };
+  }
+
+  function monthsIn(fund, asOf = today) {
+    const s = parse(fund.start_month);
+    const n = (asOf.getFullYear() - s.getFullYear()) * 12 + (asOf.getMonth() - s.getMonth()) + 1;
+    return Math.max(0, n);
+  }
+
+  function fundState(f) {
+    const members = S.members.filter((m) => m.fund_id === f.id).sort((a, b) => (a.sort ?? 100) - (b.sort ?? 100) || a.name.localeCompare(b.name));
+    const entries = S.entries.filter((e) => e.fund_id === f.id);
+    const deposits = entries.filter((e) => e.kind === "deposit");
+    const out = entries.filter((e) => e.kind === "withdrawal").reduce((s, e) => s + Number(e.amount), 0);
+    const months = monthsIn(f);
+    const key = monthKey(today);
+    const per = (m) => Number(m.monthly ?? f.monthly_per_person);
+    const rows = members.map((m) => {
+      const mine = deposits.filter((e) => e.member_id === m.id);
+      const paid = mine.reduce((s, e) => s + Number(e.amount), 0);
+      const thisMonth = mine.filter((e) => String(e.month).slice(0, 10) === key).reduce((s, e) => s + Number(e.amount), 0);
+      return { m, per: per(m), paid, thisMonth, owes: Math.max(0, per(m) * months - paid) };
+    });
+    const put = deposits.reduce((s, e) => s + Number(e.amount), 0);
+    const expected = rows.reduce((s, r) => s + r.per * months, 0) - out;
+    return { members, rows, entries, months, key, expected, actual: put - out, out, monthlyTotal: rows.reduce((s, r) => s + r.per, 0) };
+  }
+
+  // ---------- views ----------
+  function viewHome() {
+    const personalCash = S.accounts.filter((a) => isCash(a) && a.scope === "personal");
+    const bizCash = S.accounts.filter((a) => isCash(a) && a.scope === "business");
+    const pc = personalCash.reduce((s, a) => s + cashOf(a), 0);
+    const bc = bizCash.reduce((s, a) => s + cashOf(a), 0);
+    const pn = cashNeed(14, "personal");
+    const bn = cashNeed(14, "business");
+    const cards = S.accounts.filter(isCard);
+    const owed = cards.reduce((s, a) => s + Number(a.balance ?? 0) + Number(a.pending ?? 0), 0);
+    const limited = cards.filter((a) => a.credit_limit && a.balance != null);
+    const limit = limited.reduce((s, a) => s + Number(a.credit_limit), 0);
+    const usedOnLimited = limited.reduce((s, a) => s + Number(a.balance) + Number(a.pending ?? 0), 0);
+    const known = cards.filter((a) => a.balance != null);
+    const status = (cash, need) => {
+      const gap = cash - need.high;
+      const unk = need.unknown.length ? ` plus ${need.unknown.length} amount${need.unknown.length > 1 ? "s" : ""} not read yet` : "";
+      if (gap < 0) return `<p class="status bad">Short by <span class="num">${usd(-gap)}</span> for the next 14 days${unk}.</p>`;
+      if (need.unknown.length) return `<p class="status warn">Covered for now, with <span class="num">${usd(gap)}</span> left${unk}.</p>`;
+      return `<p class="status ok">Covered, with <span class="num">${usd(gap)}</span> left after the next 14 days.</p>`;
+    };
+    const next = upcoming(10).slice(0, 8);
+    const fundsHtml = S.funds.map((f) => {
+      const st = fundState(f);
+      const behind = st.expected - st.actual;
+      return `<li><span class="what"><b>${esc(f.name)}</b><small>${st.members.length} people · ${usd0(st.monthlyTotal)} a month</small></span>
+        <span class="stack" style="text-align:right"><span class="amt">${usd0(st.actual)}</span>
+        <small class="${behind > 0 ? "muted" : "muted"}">${behind > 0 ? usd0(behind) + " behind" : st.months ? "on track" : "starts " + short(parse(f.start_month))}</small></span></li>`;
+    }).join("");
+
+    return `
+    <section class="card wide" id="today-cash">
+      <header><span class="label">Personal cash</span><span class="muted" style="font-size:13px">${personalCash.length} accounts</span></header>
+      <div class="big num">${usd(pc)}</div>
+      <div class="row"><span>Due from it in the next 14 days</span><span class="amt">${pn.low === pn.high ? usd(pn.low) : usd(pn.low) + "–" + usd(pn.high).slice(1)}</span></div>
+      ${status(pc, pn)}
+      ${pn.unknown.length ? `<p class="note">Not read yet: ${pn.unknown.map((i) => esc(i.bill.name) + " (" + short(i.date) + ")").join(", ")}.</p>` : ""}
+    </section>
+
+    <section class="card" id="today-next">
+      <header><h2>Next 10 days</h2><a href="#upcoming" style="font-size:14px">All upcoming</a></header>
+      <ul class="list">${next.map(itemLi).join("") || `<li class="muted">Nothing due.</li>`}</ul>
+    </section>
+
+    <section class="card" id="today-cards">
+      <header><h2>Cards</h2><a href="#cards" style="font-size:14px">Details</a></header>
+      <div class="row"><span>Owed on ${known.length} of ${cards.length} cards</span><span class="mid num">${usd0(owed)}</span></div>
+      ${limit ? `<div class="meter ${usedOnLimited / limit > 0.9 ? "hot" : usedOnLimited / limit > 0.5 ? "mid" : ""}"><span style="width:${Math.min(100, (usedOnLimited / limit) * 100).toFixed(1)}%"></span></div>
+      <small class="muted">${((usedOnLimited / limit) * 100).toFixed(0)}% used on the ${limited.length} card${limited.length > 1 ? "s" : ""} with a known limit (${usd0(limit)})</small>` : ""}
+      <ul class="list">${cards.map((a) => `<li><span class="what"><span>${esc(acctName(a))}</span><small>${a.due_day ? "due the " + ord(a.due_day) : ""}${a.autopay ? " · " + esc(a.autopay) : ""}</small></span>
+        <span class="amt">${a.balance == null ? `<span class="pill plain">not read</span>` : usd(Number(a.balance) + Number(a.pending ?? 0))}</span></li>`).join("")}</ul>
+    </section>
+
+    <section class="card" id="today-business">
+      <header><h2>Business</h2><span class="muted" style="font-size:13px">Eros Group</span></header>
+      <div class="row"><span>Cash</span><span class="amt">${usd(bc)}</span></div>
+      <div class="row"><span>Subscriptions and bills, next 14 days</span><span class="amt">${usd(bn.high)}</span></div>
+      ${status(bc, bn)}
+    </section>
+
+    <section class="card" id="today-funds">
+      <header><h2>Funds</h2><a href="#funds" style="font-size:14px">Open</a></header>
+      <ul class="list">${fundsHtml || `<li class="muted">No funds yet.</li>`}</ul>
+    </section>`;
+  }
+
+  function itemLi(i) {
+    const b = i.bill;
+    const amt = i.paid ? `<span class="pill ok">${i.paid.pending ? "pending" : "paid"} ${usd(Number(i.paid.amount))}</span>` :
+      b.amount == null ? `<span class="pill warn">amount?</span>` :
+      b.amount_max ? `${usd0(b.amount)}–${usd0(b.amount_max).slice(1)}` : usd(Number(b.amount));
+    const where = i.from ? (isCard(i.from) ? "on " : "from ") + acctName(i.from) : "account not set";
+    return `<li><span class="what"><span>${esc(b.name)}</span><small>${day(i.date)} · ${esc(where)}${b.note ? " · " + esc(b.note) : ""}</small></span><span class="amt">${amt}</span></li>`;
+  }
+
+  function viewCards() {
+    const groups = [
+      ["Cards", S.accounts.filter(isCard)],
+      ["Personal cash", S.accounts.filter((a) => isCash(a) && a.scope === "personal")],
+      ["Business cash", S.accounts.filter((a) => isCash(a) && a.scope === "business")],
+    ];
+    const card = (a) => {
+      const bal = a.balance == null ? null : Number(a.balance);
+      const pend = Number(a.pending ?? 0);
+      const used = a.credit_limit && bal != null ? (bal + pend) / a.credit_limit : null;
+      const auto = a.autopay ? S.accounts.find((x) => isCash(x) && a.autopay.includes(x.mask ?? "~")) : null;
+      const warns = [];
+      if (used != null && used >= 0.9) warns.push(`<span class="pill bad">${(used * 100).toFixed(0)}% of limit</span>`);
+      if (auto && cashOf(auto) < 50) warns.push(`<span class="pill warn">AutoPay account has ${usd(cashOf(auto))}</span>`);
+      if (bal == null) warns.push(`<span class="pill plain">not read yet</span>`);
+      return `<section class="card" id="acct-${esc(a.id)}">
+        <header><h3>${esc(acctName(a))}</h3><span class="muted" style="font-size:13px">${esc(a.institution)}</span></header>
+        ${warns.length ? `<div class="members">${warns.join("")}</div>` : ""}
+        <div class="row"><span class="mid num">${bal == null ? "—" : usd(bal + pend)}</span>
+          ${isCard(a) && pend ? `<small class="muted">${usd(bal)} posted + ${usd(pend)} pending</small>` : isCash(a) && a.available != null && a.available !== a.balance && a.balance != null ? `<small class="muted">${usd(a.balance)} balance</small>` : ""}</div>
+        ${used != null ? `<div class="meter ${used > 0.9 ? "hot" : used > 0.5 ? "mid" : ""}"><span style="width:${Math.min(100, used * 100).toFixed(1)}%"></span></div>` : ""}
+        <div class="grid2">
+          ${a.credit_limit ? kv("Limit", usd0(a.credit_limit)) : ""}
+          ${isCard(a) && a.credit_limit && bal != null ? kv("Available", usd(a.credit_limit - bal - pend)) : ""}
+          ${a.statement_balance != null ? kv("Last statement", usd(a.statement_balance) + (a.statement_date ? ` <small class="muted">${short(parse(a.statement_date))}</small>` : "")) : ""}
+          ${a.close_day ? kv("Statement closes", "the " + ord(a.close_day)) : ""}
+          ${a.due_day ? kv("Payment due", "the " + ord(a.due_day)) : ""}
+          ${a.autopay ? kv("AutoPay", esc(a.autopay)) : ""}
+          ${a.rewards ? kv("Rewards", esc(a.rewards)) : ""}
+        </div>
+        ${a.note ? `<p class="note">${esc(a.note)}</p>` : ""}
+        <small class="muted">${a.as_of ? "As of " + new Date(a.as_of).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""}</small>
+      </section>`;
+    };
+    return groups.filter(([, l]) => l.length).map(([t, l]) => `<h2 class="wide" style="margin-top:6px">${t}</h2>${l.map(card).join("")}`).join("");
+  }
+  const kv = (k, v) => `<div class="kv"><small class="muted">${k}</small><b>${v}</b></div>`;
+
+  function viewSpend() {
+    const withTx = S.accounts.filter((a) => S.transactions.some((t) => t.account_id === a.id));
+    if (!withTx.length) return `<section class="card wide"><h2>Spending</h2><p class="muted">No transactions yet. They arrive with the morning sync.</p></section>`;
+    if (!ui.spendAcct || !withTx.some((a) => a.id === ui.spendAcct)) ui.spendAcct = (withTx.find(isCard) || withTx[0]).id;
+    const a = acct(ui.spendAcct);
+    let from, label;
+    if (ui.spendPeriod === "statement" && a.statement_date) { from = addDays(parse(a.statement_date), 1); label = "since the " + short(parse(a.statement_date)) + " statement"; }
+    else if (ui.spendPeriod === "30") { from = addDays(today, -29); label = "in the last 30 days"; }
+    else { from = new Date(today.getFullYear(), today.getMonth(), 1); label = "this month"; }
+    const tx = S.transactions.filter((t) => t.account_id === a.id && parse(t.date) >= from).sort((x, y) => (y.date > x.date ? 1 : -1));
+    const out = tx.filter((t) => Number(t.amount) > 0);
+    const inn = tx.filter((t) => Number(t.amount) < 0);
+    const spent = out.reduce((s, t) => s + Number(t.amount), 0);
+    const paid = -inn.reduce((s, t) => s + Number(t.amount), 0);
+    const pend = out.filter((t) => t.pending).reduce((s, t) => s + Number(t.amount), 0);
+    const group = (key) => Object.entries(out.reduce((m, t) => { const k = key(t) || "Other"; m[k] = (m[k] || 0) + Number(t.amount); return m; }, {})).sort((x, y) => y[1] - x[1]);
+    const cats = group((t) => t.category);
+    const merch = group((t) => t.merchant.replace(/\s+(\*|#)\S*.*$/, "").replace(/\s+\d{2}\/\d{2}$/, "").trim()).slice(0, 10);
+    const bars = (list) => { const max = list[0]?.[1] || 1; return `<div class="bars">${list.map(([k, v]) =>
+      `<div class="b"><span class="nm" title="${esc(k)}">${esc(k)}</span><span class="t"><span style="width:${((v / max) * 100).toFixed(1)}%"></span></span><span class="amt">${usd0(v)}</span></div>`).join("")}</div>`; };
+    return `
+    <section class="card wide" id="spend-head">
+      <div class="row" style="flex-wrap:wrap">
+        <select id="spend-acct" aria-label="Account">${withTx.map((x) => `<option value="${esc(x.id)}" ${x.id === a.id ? "selected" : ""}>${esc(acctName(x))}</option>`).join("")}</select>
+        <div class="seg" role="group" aria-label="Period">
+          ${a.statement_date ? `<button data-period="statement" aria-pressed="${ui.spendPeriod === "statement"}">This cycle</button>` : ""}
+          <button data-period="month" aria-pressed="${ui.spendPeriod === "month" || (ui.spendPeriod === "statement" && !a.statement_date)}">This month</button>
+          <button data-period="30" aria-pressed="${ui.spendPeriod === "30"}">30 days</button>
+        </div>
+      </div>
+      <span class="label">Spent ${esc(label)}</span>
+      <div class="big num">${usd(spent)}</div>
+      <small class="muted">${out.length} charges${pend ? ` · ${usd(pend)} still pending` : ""}${paid ? ` · ${usd(paid)} paid in` : ""}</small>
+    </section>
+    <section class="card" id="spend-cats"><h2>By category</h2>${cats.length ? bars(cats) : `<p class="muted">No charges.</p>`}</section>
+    <section class="card" id="spend-merch"><h2>Top places</h2>${merch.length ? bars(merch) : `<p class="muted">No charges.</p>`}</section>
+    <section class="card wide" id="spend-list"><h2>Transactions</h2>
+      <ul class="list">${tx.slice(0, 80).map((t) => `<li><span class="what"><span>${esc(t.merchant)}</span><small>${short(parse(t.date))}${t.category ? " · " + esc(t.category) : ""}${t.pending ? " · pending" : ""}</small></span>
+        <span class="amt ${Number(t.amount) < 0 ? "in" : ""}">${Number(t.amount) < 0 ? "+" + usd(-t.amount) : usd(Number(t.amount))}</span></li>`).join("")}</ul>
+      ${tx.length > 80 ? `<p class="note">Showing the latest 80 of ${tx.length}.</p>` : ""}
+    </section>`;
+  }
+
+  function viewUpcoming() {
+    const items = upcoming(ui.upDays, ui.upScope);
+    const byDay = new Map();
+    for (const i of items) { const k = ymd(i.date); if (!byDay.has(k)) byDay.set(k, []); byDay.get(k).push(i); }
+    const fromCash = items.filter((i) => !isCard(i.from) && !i.paid);
+    const perAcct = new Map();
+    for (const i of fromCash) { const k = i.from ? i.from.id : "_"; const v = perAcct.get(k) || { a: i.from, sum: 0, unk: 0 }; if (i.bill.amount == null) v.unk++; else v.sum += Number(i.bill.amount_max ?? i.bill.amount); perAcct.set(k, v); }
+    return `
+    <section class="card wide" id="up-head">
+      <div class="row" style="flex-wrap:wrap">
+        <div class="seg" role="group" aria-label="Whose">
+          ${["all", "personal", "business"].map((s) => `<button data-scope="${s}" aria-pressed="${ui.upScope === s}">${s[0].toUpperCase() + s.slice(1)}</button>`).join("")}
+        </div>
+        <div class="seg" role="group" aria-label="How far">
+          ${[14, 45, 90].map((n) => `<button data-days="${n}" aria-pressed="${ui.upDays === n}">${n} days</button>`).join("")}
+        </div>
+      </div>
+      <h2>Cash needed by account</h2>
+      <ul class="list">${[...perAcct.values()].filter((v) => v.sum > 0 || v.unk).sort((x, y) => y.sum - x.sum).map((v) => `<li><span class="what"><span>${esc(v.a ? acctName(v.a) : "Account not set")}</span>
+        <small>${v.a && isCash(v.a) ? "has " + usd(cashOf(v.a)) : ""}${v.unk ? ` · ${v.unk} amount${v.unk > 1 ? "s" : ""} not read` : ""}</small></span>
+        <span class="amt">${usd(v.sum)}</span></li>`).join("") || `<li class="muted">Nothing due.</li>`}</ul>
+      <p class="note">Charges that go on a card are listed below but add to that card's balance, not to cash needed.</p>
+    </section>
+    <section class="card wide" id="up-list"><h2>Next ${ui.upDays} days</h2>
+      ${[...byDay.entries()].map(([k, l]) => `<div class="day">${day(parse(k))}</div><ul class="list">${l.map(itemLi).join("")}</ul>`).join("") || `<p class="muted">Nothing due.</p>`}
+    </section>`;
+  }
+
+  function viewFunds() {
+    if (!S.funds.length) return `<section class="card wide"><h2>Funds</h2><p class="muted">No funds yet.</p></section>`;
+    return S.funds.map((f) => {
+      const st = fundState(f);
+      const behind = st.expected - st.actual;
+      const monthName = today.toLocaleDateString("en-US", { month: "long" });
+      const started = st.months > 0;
+      const chips = st.rows.map((r) => {
+        const done = r.thisMonth >= r.per;
+        return `<span class="chip ${done ? "paid" : ""}">${esc(r.m.name)} ${done ? "✓" : usd0(r.per - r.thisMonth)}
+          ${!done && isOwner && started ? `<button data-pay="${f.id}:${r.m.id}:${r.per - r.thisMonth}" aria-label="Mark ${esc(r.m.name)} paid for ${monthName}">Mark paid</button>` : ""}</span>`;
+      }).join("");
+      const hist = st.entries.slice().sort((x, y) => (y.on_date > x.on_date ? 1 : -1)).slice(0, 40);
+      const who = (id) => st.members.find((m) => m.id === id)?.name ?? "";
+      return `<section class="card wide" id="fund-${f.id}">
+        <header><h2>${esc(f.name)}</h2><span class="muted" style="font-size:13px">${st.members.map((m) => esc(m.name)).join(", ")}</span></header>
+        <div class="grid2">
+          ${kv("Has", `<span class="mid num">${usd0(st.actual)}</span>`)}
+          ${kv(started ? `Should have by ${short(new Date(today.getFullYear(), today.getMonth() + 1, 0))}` : "Starts", started ? `<span class="mid num">${usd0(st.expected)}</span>` : short(parse(f.start_month)))}
+          ${kv("Each month", usd0(st.monthlyTotal) + ` <small class="muted">${usd0(f.monthly_per_person)} each</small>`)}
+          ${f.goal ? kv("Goal", usd0(f.goal)) : ""}
+        </div>
+        ${started ? (behind > 0 ? `<p class="status warn">${usd0(behind)} behind. ${st.rows.filter((r) => r.owes > 0).map((r) => `${esc(r.m.name)} owes ${usd0(r.owes)}`).join(", ")}.</p>` : `<p class="status ok">Everyone is up to date.</p>`) : `<p class="note">First deposits are due ${short(parse(f.start_month))}.</p>`}
+        ${f.goal ? `<div class="meter"><span style="width:${Math.min(100, (st.actual / f.goal) * 100).toFixed(1)}%"></span></div>` : ""}
+        <span class="label">${started ? monthName : "First month"}</span>
+        <div class="members">${chips}</div>
+        ${f.held_in ? `<p class="note">Money sits in: ${esc(f.held_in)}</p>` : isOwner ? `<p class="note">Where the money sits isn't set yet.</p>` : ""}
+        ${isOwner ? `<details><summary>Take money out</summary>
+          <form class="row" data-withdraw="${f.id}" style="margin-top:8px;flex-wrap:wrap">
+            <input id="wd-amt-${f.id}" name="amount" type="number" min="1" step="0.01" placeholder="Amount" required style="width:120px">
+            <input id="wd-note-${f.id}" name="note" placeholder="What for" style="flex:1;min-width:140px">
+            <button class="btn small" type="submit">Record</button>
+          </form></details>` : ""}
+        <details><summary>History (${st.entries.length})</summary>
+          <ul class="list" style="margin-top:6px">${hist.map((e) => `<li><span class="what"><span>${e.kind === "deposit" ? esc(who(e.member_id)) + (e.month ? " · " + parse(e.month).toLocaleDateString("en-US", { month: "short", year: "numeric" }) : "") : "Taken out" + (e.note ? ": " + esc(e.note) : "")}</span>
+            <small>${short(parse(e.on_date))}</small></span>
+            <span class="row" style="gap:8px"><span class="amt ${e.kind === "deposit" ? "in" : ""}">${e.kind === "deposit" ? "+" : "−"}${usd0(e.amount)}</span>
+            ${isOwner ? `<button class="btn ghost small" data-del="${e.id}">Remove</button>` : ""}</span></li>`).join("") || `<li class="muted">Nothing yet.</li>`}</ul>
+        </details>
+      </section>`;
+    }).join("");
+  }
+
+  // ---------- shell ----------
+  const VIEWS = { home: viewHome, cards: viewCards, spend: viewSpend, upcoming: viewUpcoming, funds: viewFunds };
+  function route() {
+    let tab = (location.hash || "#home").slice(1);
+    if (!isOwner) tab = "funds";
+    if (!VIEWS[tab]) tab = "home";
+    document.querySelectorAll("#tabs a").forEach((a) => {
+      a.hidden = !isOwner && a.dataset.tab !== "funds";
+      if (a.dataset.tab === tab) { a.setAttribute("aria-current", "page"); a.scrollIntoView({ block: "nearest", inline: "nearest" }); } else a.removeAttribute("aria-current");
+    });
+    const main = $("#main");
+    main.className = "main" + (tab === "home" || tab === "cards" || tab === "spend" ? " two" : "");
+    try { main.innerHTML = VIEWS[tab](); } catch (e) { main.innerHTML = `<p class="err pad">This page failed to draw: ${esc(e.message)}</p>`; console.error(e); }
+  }
+
+  function header() {
+    const s = S.syncs?.[0];
+    $("#synced").textContent = s ? `Updated ${new Date(s.at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${s.missing?.length ? " · not read: " + s.missing.join(", ") : ""}` : "Not synced yet";
+    $("#foot").innerHTML = Money.local
+      ? `Local preview with ${S.accounts.length} accounts and ${S.bills.length} bills. Nothing here saves.`
+      : `Signed in as ${esc(me.user.email)} · <a href="#" id="signout">Sign out</a>`;
+  }
+
+  async function refresh() {
+    S = await Money.load();
+    isOwner = Money.local || S.accounts.length > 0 || S.funds.some((f) => f.owner === me?.user?.id);
+    header();
+    route();
+  }
+
+  document.addEventListener("click", async (ev) => {
+    const t = ev.target.closest("button, a");
+    if (!t) return;
+    if (t.id === "signout") { ev.preventDefault(); await Money.signOut(); location.reload(); return; }
+    if (t.dataset.period) { ui.spendPeriod = t.dataset.period; route(); return; }
+    if (t.dataset.scope) { ui.upScope = t.dataset.scope; route(); return; }
+    if (t.dataset.days) { ui.upDays = Number(t.dataset.days); route(); return; }
+    if (t.dataset.pay) {
+      const [fund_id, member_id, amount] = t.dataset.pay.split(":").map(Number);
+      t.disabled = true;
+      try { await Money.addEntry({ fund_id, member_id, kind: "deposit", month: monthKey(today), amount, on_date: ymd(today) }); await refresh(); }
+      catch (e) { t.disabled = false; t.textContent = e.message.startsWith("This is the local") ? "Preview only" : "Didn't save"; console.error(e); }
+      return;
+    }
+    if (t.dataset.del) {
+      if (t.dataset.armed !== "1") { t.dataset.armed = "1"; t.textContent = "Tap again to remove"; return; }
+      try { await Money.deleteEntry(Number(t.dataset.del)); await refresh(); } catch (e) { t.textContent = "Didn't remove"; console.error(e); }
+    }
+  });
+  document.addEventListener("change", (ev) => { if (ev.target.id === "spend-acct") { ui.spendAcct = ev.target.value; route(); } });
+  document.addEventListener("submit", async (ev) => {
+    const f = ev.target.closest("form[data-withdraw]");
+    if (!f) return;
+    ev.preventDefault();
+    const btn = f.querySelector("button");
+    try {
+      await Money.addEntry({ fund_id: Number(f.dataset.withdraw), kind: "withdrawal", amount: Number(f.amount.value), note: f.note.value || null, on_date: ymd(today) });
+      await refresh();
+    } catch (e) { btn.textContent = e.message.startsWith("This is the local") ? "Preview only" : "Didn't save"; console.error(e); }
+  });
+  window.addEventListener("hashchange", route);
+
+  async function start() {
+    me = await Money.session();
+    if (!me) {
+      $("#signin").hidden = false; $("#main").hidden = true; $("#tabs").hidden = true;
+      $("#signin-form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const fm = ev.target; $("#si-err").hidden = true;
+        try { await Money.signIn(fm.email.value.trim(), fm.password.value); location.reload(); }
+        catch (e) { $("#si-err").textContent = "That email and password didn't match. Check them and try again."; $("#si-err").hidden = false; }
+      });
+      return;
+    }
+    try { await refresh(); }
+    catch (e) { $("#main").innerHTML = `<section class="card"><h2>Couldn't load</h2><p class="muted">${esc(e.message)}</p></section>`; console.error(e); }
+  }
+  start();
+})();
