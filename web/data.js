@@ -30,7 +30,7 @@ window.Money = (() => {
   async function mfaEnroll() {
     const f = ok(await sb.auth.mfa.listFactors());
     for (const x of f.all || []) if (x.status !== "verified") await sb.auth.mfa.unenroll({ factorId: x.id });
-    const e = ok(await sb.auth.mfa.enroll({ factorType: "totp", friendlyName: "Money" }));
+    const e = ok(await sb.auth.mfa.enroll({ factorType: "totp", friendlyName: "Money", issuer: "Money" }));
     return { factorId: e.id, qr: e.totp.qr_code, secret: e.totp.secret };
   }
   async function mfaVerify(factorId, code) { ok(await sb.auth.mfa.challengeAndVerify({ factorId, code })); }

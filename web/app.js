@@ -430,7 +430,7 @@
       const e = await Money.mfaEnroll();
       factorId = e.factorId;
       $("#mfa-title").textContent = "Set up your code";
-      $("#mfa-help").textContent = "Scan this with an authenticator app (iPhone Passwords, Google Authenticator or 1Password), then type the 6-digit code it shows. You'll need a code each time you sign in.";
+      $("#mfa-help").textContent = "Scan this with an authenticator app (iPhone Passwords, Google Authenticator or 1Password), then type the 6-digit code it shows. Don't reload this page after scanning: a reload makes a new QR code. You'll need a code each time you sign in.";
       $("#mfa-qr").src = e.qr; $("#mfa-qr").hidden = false;
       $("#mfa-secret").textContent = "Can't scan? Enter this key by hand: " + e.secret; $("#mfa-secret").hidden = false;
     } else {
